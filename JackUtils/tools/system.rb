@@ -1,134 +1,109 @@
-# Fichier: Plugins/JackUtils/tools/system.rb
-require 'win32/registry' if Sketchup.platform == :platform_win
-require 'json'
+# encoding: UTF-8
+require 'sketchup.rb'
 
 module JackUtils
   module System
     
-    # --- 1. PURGE FICHIERS RÉCENTS ---
+    # --- 1. PURGE RECENT ---
     def self.purge_recent
       if Sketchup.platform == :platform_win
         begin
+          require 'win32/registry'
+          # Chemin registre (Adaptez 2024 si besoin vers votre version)
           path = 'Software\SketchUp\SketchUp 2024\Recent File List'
-          # Tente d'adapter l'année si besoin, ou reste générique
           Win32::Registry::HKEY_CURRENT_USER.open(path, Win32::Registry::KEY_WRITE) do |reg|
             reg.each_value { |name, _, _| reg.delete_value(name) }
           end
-          UI.messagebox("Fichiers récents purgés avec succès.")
+          # Utilisation de \u00E9 pour "�" afin d'�viter l'erreur multibyte
+          UI.messagebox("Succ\u00E8s : Fichiers r\u00E9cents purg\u00E9s.")
         rescue => e
-          UI.messagebox("Erreur (Windows) : #{e.message}")
+          UI.messagebox("Erreur purge (Windows) : #{e.message}")
         end
       else
-        UI.messagebox("Cette fonction est pour Windows uniquement.")
+        UI.messagebox("Fonction Windows uniquement.")
       end
     end
 
-    # --- 2. HOT RELOAD (Ton interface avancée) ---
-    module HotReload
-      def self.scan_plugins
-        root = Sketchup.find_support_file("Plugins")
-        entries = []
-        
-        # Scan des dossiers
-        Dir.glob(File.join(root, "**", "*")).select { |p| File.directory?(p) }.each do |d|
-          # Chemin relatif
-          entries << d.sub(/^#{Regexp.escape(root + File::SEPARATOR)}/, "") + '/'
-        end
-        
-        # Scan des fichiers .rb
-        Dir.glob(File.join(root, "**", "*.rb")).each do |f|
-          entries << f.sub(/^#{Regexp.escape(root + File::SEPARATOR)}/, "")
-        end
-        entries.sort
+    # --- 2. RELOAD UI ---
+    def self.get_plugin_files
+      root = Sketchup.find_support_file("Plugins")
+      files = []
+      
+      # R�cup�ration r�cursive des fichiers .rb
+      Dir.glob(File.join(root, "**", "*.rb")).each do |f|
+        # Cr�ation du chemin relatif
+        rel_path = f.sub(root, "")
+        # Nettoyage critique pour Windows : on remplace antislash par slash
+        rel_path = rel_path.gsub("\\", "/")
+        # On enl�ve le slash de d�but s'il reste
+        rel_path = rel_path[1..-1] if rel_path.start_with?("/")
+        files << rel_path
+      end
+      files.sort
+    end
+
+    def self.show_reload_dialog
+      # On pr�pare la liste HTML ici, en Ruby
+      files = get_plugin_files
+      options_list = ""
+      
+      files.each do |f|
+        options_list += "<option value='#{f}'>#{f}</option>"
       end
 
-      def self.show_dialog
-        files = scan_plugins
-        # HTML intégré directement
-        html = <<~HTML
-          <!DOCTYPE html>
-          <html>
-          <body style="font-family:sans-serif; margin:10px; background-color:#f0f0f0;">
-            <h3 style="color:#333;">Hot Reload Plugin</h3>
-            <p style="font-size:0.8em; color:#666;">Sélectionnez un fichier ou dossier à recharger :</p>
-            <select id="plist" style="width:100%; height:200px; padding:4px; border:1px solid #ccc;" size="15">
-              #{ files.map{ |e| "<option>#{e}</option>" }.join }
-            </select>
-            <div style="margin-top:10px; text-align:right">
-              <button onclick="reload()" style="padding:5px 10px; cursor:pointer;">🔄 Reload</button>
-              <button onclick="closeDialog()" style="padding:5px 10px; cursor:pointer;">✖ Fermer</button>
-            </div>
-            <script>
-              function reload() {
-                const sel = document.getElementById('plist');
-                if (sel.selectedIndex >= 0) {
-                  const val = sel.options[sel.selectedIndex].value;
-                  window.sketchup.reloadPlugin(val);
-                }
+      # On injecte la liste directement dans le HTML
+      html = <<~HTML
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family:sans-serif; background:#f0f0f0; padding:10px;">
+          <h3>Reload Plugins</h3>
+          <select id="file_select" style="width:100%; height:300px; margin-bottom:10px;">
+            #{options_list}
+          </select>
+          <button onclick="doReload()" style="width:100%; padding:10px; font-weight:bold; cursor:pointer;">RECHARGER</button>
+          
+          <script>
+            function doReload() {
+              var sel = document.getElementById('file_select');
+              if (sel.selectedIndex >= 0) {
+                window.sketchup.reload_file(sel.value);
+              } else {
+                alert("Veuillez choisir un fichier !");
               }
-              function closeDialog() { window.sketchup.closeWindow(); }
-            </script>
-          </body>
-          </html>
-        HTML
+            }
+          </script>
+        </body>
+        </html>
+      HTML
 
-        @dlg ||= UI::HtmlDialog.new(
-          dialog_title: "Jack Hot Reload",
-          preferences_key: "JackHotReloadUI",
-          width: 400, height: 350,
-          style: UI::HtmlDialog::STYLE_DIALOG
-        )
-
-        @dlg.set_html(html)
-        @dlg.add_action_callback("reloadPlugin") { |_, path| self.do_reload(path) }
-        @dlg.add_action_callback("closeWindow") { |_| @dlg.close }
-        @dlg.center
-        @dlg.show
+      @dlg = UI::HtmlDialog.new(
+        dialog_title: "Jack Reload",
+        preferences_key: "JackReloadSafe",
+        width: 400, height: 450,
+        style: UI::HtmlDialog::STYLE_DIALOG
+      )
+      
+      @dlg.set_html(html)
+      @dlg.center
+      
+      @dlg.add_action_callback("reload_file") do |_, filename|
+        self.perform_reload(filename)
       end
-
-      def self.do_reload(rel_path)
-        root = Sketchup.find_support_file("Plugins")
-        target = File.join(root, rel_path)
-        
-        # Détermine si on recharge un dossier ou un fichier
-        scan_dir = if rel_path.end_with?('/')
-                     target
-                   elsif File.file?(target)
-                     File.dirname(target)
-                   else
-                     nil
-                   end
-
-        unless scan_dir && Dir.exist?(scan_dir)
-          UI.messagebox("Chemin invalide : #{rel_path}")
-          return
-        end
-
-        # Si c'est un fichier spécifique, on ne recharge que lui, sinon tout le dossier
-        files = File.file?(target) ? [target] : Dir.glob(File.join(scan_dir, "**", "*.rb")).sort
-        
-        errors = []
-        files.each do |f|
-          begin
-            load f # C'est ICI que la magie opère (force la relecture)
-            puts "Rechargé : #{File.basename(f)}"
-          rescue Exception => e
-            errors << "#{File.basename(f)} : #{e.message}"
-          end
-        end
-
-        if errors.empty?
-          Sketchup.status_text = "Succès : #{files.size} fichiers rechargés."
-          UI.beep
-        else
-          UI.messagebox("Erreurs :\n" + errors.join("\n"))
-        end
-      end
+      
+      @dlg.show
     end
 
-    # Point d'entrée appelé par le bouton de la toolbar
-    def self.launch_reload_ui
-      HotReload.show_dialog
+    def self.perform_reload(rel_path)
+      root = Sketchup.find_support_file("Plugins")
+      full_path = File.join(root, rel_path)
+      
+      begin
+        load full_path
+        # Utilisation de \u00E9 pour �viter l'erreur d'encodage sur le message
+        UI.messagebox("Fichier recharg\u00E9 :\n#{rel_path}")
+      rescue => e
+        UI.messagebox("Erreur :\n#{e.message}")
+      end
     end
 
   end
